@@ -19,8 +19,10 @@ def get_data_dir(environment: str) -> Path:
 
     return data_dir
 
-def load_validation_manifest(splits_dir):
-    path = Path(splits_dir) / "validation_manifest.parquet"
+def load_manifest(splits_dir, name="validation_manifest"):
+    path = Path(splits_dir) / f"{name}.parquet"
+    if not path.is_file():
+        raise FileNotFoundError(f"Manifest not found: {path}")
     return pd.read_parquet(path)
 
 
@@ -33,8 +35,32 @@ def select_manifest_rows(df, manifest, source, split):
     if not df.index.is_unique:
         raise ValueError("Dataset index must be unique")
 
-    missing = selected.difference(df.index)
+    missing = pd.Index(selected).difference(df.index)
     if len(missing):
         raise ValueError(f"{len(missing)} row_ids not found in dataset")
 
     return df.loc[selected].copy()
+
+
+def load_data_splits(environment, splits_dir, sources=("uk", "ru")):
+    from src.preprocessing import preprocess_data
+
+    data_dir = get_data_dir(environment)
+    manifest = load_manifest(splits_dir)
+    result = {}
+
+    for source in sources:
+        if source not in ("uk", "ru"):
+            raise ValueError(f"Unsupported source: {source}")
+
+        df = pd.read_csv(data_dir / f"{source}_geo_dataset.csv")
+        df = preprocess_data(df)
+
+        for split in ("train", "val"):
+            result[f"{source}_{split}"] = select_manifest_rows(
+                df, manifest, source, split
+            )
+
+        del df
+
+    return result
