@@ -42,9 +42,7 @@ def select_manifest_rows(df, manifest, source, split):
     return df.loc[selected].copy()
 
 
-def load_data_splits(environment, splits_dir, sources=("uk", "ru")):
-    from src.preprocessing import preprocess_data
-
+def load_data_splits(environment, splits_dir, sources=("uk", "ru"), chunksize=100_000):
     data_dir = get_data_dir(environment)
     manifest = load_manifest(splits_dir)
     result = {}
@@ -53,14 +51,32 @@ def load_data_splits(environment, splits_dir, sources=("uk", "ru")):
         if source not in ("uk", "ru"):
             raise ValueError(f"Unsupported source: {source}")
 
-        df = pd.read_csv(data_dir / f"{source}_geo_dataset.csv")
-        df = preprocess_data(df)
+        source_manifest = manifest.loc[manifest["source"] == source]
+        required_ids = pd.Index(source_manifest["row_id"])
+        parts = []
+        offset = 0
+
+        reader = pd.read_csv(
+            data_dir / f"{source}_geo_dataset.csv",
+            chunksize=chunksize
+        )
+
+        for chunk in reader:
+            chunk.index = pd.RangeIndex(offset, offset + len(chunk))
+            selected = chunk.loc[chunk.index.isin(required_ids)]
+
+            if not selected.empty:
+                parts.append(selected)
+
+            offset += len(chunk)
+
+        df = pd.concat(parts)
 
         for split in ("train", "val"):
             result[f"{source}_{split}"] = select_manifest_rows(
                 df, manifest, source, split
             )
 
-        del df
+        del df, parts
 
     return result
