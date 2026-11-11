@@ -37,7 +37,7 @@ def run_sweep_trial(base_config, provenance, tokenizer, train_loader, val_loader
                 **provenance, "run_id": run_id, "sweep_id": run.sweep_id,
                 "source_sha256": {path.name: file_sha256(path)
                                   for path in sorted((repo_dir / "src").glob("*.py"))},
-                "notebook_sha256": file_sha256(repo_dir / "notebooks/04_bilstm_stacked.ipynb"),
+                "notebook_sha256": file_sha256(repo_dir / "notebooks/04_bilstm_sweep.ipynb"),
             }
             run.config.update({"provenance": trial_provenance})
             save_json(run_dir / "config.json", config)
