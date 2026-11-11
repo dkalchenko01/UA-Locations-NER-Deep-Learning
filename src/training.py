@@ -34,7 +34,7 @@ def train_epoch(model, loader, optimizer, device, gradient_clip=1.0):
             continue
         optimizer.zero_grad(set_to_none=True)
         logits = model(ids, batch["lengths"])
-        loss = F.cross_entropy(logits.transpose(1, 2), labels,
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1),
                                ignore_index=IGNORE_INDEX, reduction="sum")
         (loss / n_tokens).backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip, error_if_nonfinite=True)
@@ -54,8 +54,9 @@ def predict(model, loader, device):
         labels = batch["labels"].to(device)
         logits = model(ids, batch["lengths"])
         pred_ids = logits.argmax(dim=-1).cpu().tolist()
-        losses = F.cross_entropy(logits.transpose(1, 2), labels,
-                                 ignore_index=IGNORE_INDEX, reduction="none").sum(dim=1).cpu().tolist()
+        losses = F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1),
+                                 ignore_index=IGNORE_INDEX, reduction="none")
+        losses = losses.reshape_as(labels).sum(dim=1).cpu().tolist()
         counts = labels.ne(IGNORE_INDEX).sum(dim=1).cpu().tolist()
         for record, predicted, loss, count in zip(batch["records"], pred_ids, losses, counts):
             source = record["source"]
