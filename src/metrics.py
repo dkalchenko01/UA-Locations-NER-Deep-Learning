@@ -59,3 +59,16 @@ def location_errors(gold, predicted):
     guess = {hard_processing(value) for value in predicted}
     return {"false_positives": sorted(guess - truth),
             "false_negatives": sorted(truth - guess)}
+
+
+def competition_scores(records, predictions, cleaner=None):
+    scores = {}
+    sources = list(dict.fromkeys(record["source"] for record in records))
+    for source in sources + ["combined"]:
+        selected = records if source == "combined" else [r for r in records if r["source"] == source]
+        gold = [record["gold_locations"] for record in selected]
+        predicted = [predictions[record["text_id"]]["locations"] for record in selected]
+        if cleaner is not None:
+            predicted = [cleaner(locations) for locations in predicted]
+        scores[f"{source}_comp_f1"] = comp_metric(gold, predicted)
+    return scores

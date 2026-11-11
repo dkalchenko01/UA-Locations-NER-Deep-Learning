@@ -1,3 +1,5 @@
+import json
+import hashlib
 from pathlib import Path
 import pandas as pd
 
@@ -80,3 +82,23 @@ def load_data_splits(environment, splits_dir, sources=("uk", "ru"), chunksize=10
         del df, parts
 
     return result
+
+
+def save_json(path, value):
+    with Path(path).open("w", encoding="utf-8") as handle:
+        json.dump(value, handle, ensure_ascii=False, indent=2)
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def save_predictions(path, records, predictions):
+    rows = [{"text_id": record["text_id"], "row_id": record["row_id"],
+             "source": record["source"], "gold_locations": record.get("gold_locations"),
+             **predictions[record["text_id"]]} for record in records]
+    pd.DataFrame(rows).to_json(path, orient="records", lines=True, force_ascii=False)

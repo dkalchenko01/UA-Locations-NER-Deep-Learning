@@ -1,10 +1,16 @@
 """Compact prepared examples and deterministic, length-aware padded batches."""
 
 import random
+from functools import partial
 
+import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import DataLoader, Dataset, Sampler
+from tqdm.auto import tqdm
+
+from src.eda_scan import parse_spans
+from src.preprocessing import prepare_bio_data
 
 LABEL_TO_ID = {"O": 0, "B-LOC": 1, "I-LOC": 2}
 ID_TO_LABEL = {value: key for key, value in LABEL_TO_ID.items()}
@@ -16,7 +22,7 @@ class NERDataset(Dataset):
 
     def __init__(self, records):
         self.records = records
-        # Packed GRUs need a positive length, including for empty inference texts.
+        # Packed RNNs need a positive length, including for empty inference texts.
         self.lengths = [max(1, len(record["input_ids"])) for record in records]
 
     def __len__(self):
@@ -103,3 +109,52 @@ def collate_ner(records, pad_id=0):
     mask = torch.arange(input_ids.shape[1])[None, :] < lengths[:, None]
     return {"input_ids": input_ids, "labels": targets, "lengths": lengths,
             "mask": mask, "records": records}
+
+
+def prepare_ner_records(tokenizer, df, source, split, batch_size=2000):
+    records, skipped_ids = [], []
+    for start in tqdm(range(0, len(df), batch_size), desc=f"Prepare {source}/{split}"):
+        batch = df.iloc[start:start + batch_size]
+        prepared, skipped = prepare_bio_data(tokenizer, batch, source)
+        skipped_ids.extend(skipped)
+        prepared = {record["text_id"]: record for record in prepared}
+        for row_id, row in batch.iterrows():
+            text_id = f"{source}_{row_id}"
+            item = prepared.get(text_id)
+            if item is None:
+                if split == "train":
+                    continue
+                encoding = tokenizer.encode(row["text"], add_special_tokens=False)
+                ids, offsets, labels = encoding.ids, encoding.offsets, None
+            else:
+                ids, offsets = item["input_ids"], item["offsets"]
+                labels = np.asarray([LABEL_TO_ID[label] for label in item["labels"]], dtype=np.int8)
+            record = {"text_id": text_id, "row_id": int(row_id), "source": source,
+                      "input_ids": np.asarray(ids, dtype=np.int32), "labels": labels}
+            if split != "train":
+                spans = parse_spans(row["loc_markers"])
+                record.update(text=row["text"], offsets=np.asarray(offsets, dtype=np.int32).reshape(-1, 2),
+                              gold_locations=[row["text"][a:b] for a, b in spans])
+            records.append(record)
+    return records, skipped_ids
+
+
+def prepare_inference_records(tokenizer, df, source="test", id_column="text_id"):
+    text_ids = df[id_column].tolist()
+    records = []
+    for text_id, (row_id, row) in zip(text_ids, df.iterrows()):
+        encoding = tokenizer.encode(row["text"], add_special_tokens=False)
+        records.append({"text_id": text_id, "row_id": int(row_id), "source": source,
+                        "text": row["text"], "input_ids": np.asarray(encoding.ids, dtype=np.int32),
+                        "offsets": np.asarray(encoding.offsets, dtype=np.int32).reshape(-1, 2),
+                        "labels": None})
+    return records
+
+
+def make_loader(records, pad_id=0, batch_size=128, shuffle=False, seed=17,
+                max_padded_tokens=16384, pin_memory=False):
+    dataset = NERDataset(records)
+    sampler = LengthBatchSampler(dataset.lengths, batch_size=batch_size, shuffle=shuffle,
+                                 seed=seed, max_padded_tokens=max_padded_tokens)
+    return DataLoader(dataset, batch_sampler=sampler, pin_memory=pin_memory,
+                      collate_fn=partial(collate_ner, pad_id=pad_id))

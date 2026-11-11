@@ -1,3 +1,5 @@
+import unicodedata
+
 from src.eda_scan import parse_spans
 
 def drop_conflicting_annotations(df):
@@ -71,3 +73,17 @@ def bio_to_spans(labels, offsets):
     if start is not None:
         spans.append((start, end))
     return spans
+
+
+def clean_locations_v3(locations):
+    cleaned = []
+    for location in locations:
+        location = "".join(ch for ch in location if not unicodedata.category(ch).startswith("So"))
+        location = location.strip()
+        if any(ch.isalnum() for ch in location):
+            cleaned.append(location)
+    return cleaned
+
+
+def serialize_spans(spans):
+    return spans if isinstance(spans, str) else repr([tuple(map(int, span)) for span in spans])

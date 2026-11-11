@@ -12,3 +12,4 @@ outputs/
 *.pth
 *.ckpt
 submission*.csv
+wandb/

@@ -6,3 +6,4 @@ tokenizers
 kagglehub
 torch
 tqdm
+wandb
