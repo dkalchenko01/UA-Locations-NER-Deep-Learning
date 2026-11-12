@@ -47,11 +47,11 @@ We implemented a **3-layer bidirectional GRU**, reusing the existing training an
 - **Architecture:** trainable 128-dimensional embeddings -> 3 bidirectional GRU layers (hidden size 256 per direction) -> dropout 0.2 -> linear classifier predicting O/B-LOC/I-LOC.
 - **Training:** Adam optimizer, learning rate 0.001, batch size 128, seed 17, trained for 3 epochs.
 - **Inference:** full-message prediction, followed by BIO-constrained Viterbi decoding with line-break constraints (`viterbi_lines`).
-- **Postprocessing:** word-boundary expansion, edge trimming, `clean_v3`, and removal of predictions with empty normalised locations, matching the best BiLSTM pipeline.
+- **Postprocessing:** word-boundary expansion, edge trimming, `clean_v3`, removal of predictions with empty locations.
 
 ### Results
 
-We evaluated the checkpoints using the official normalized micro F1 metric. The best result after Viterbi decoding and postprocessing was obtained at **epoch 3**.
+We evaluated the checkpoints using the normalized micro F1 metric. The best result (after Viterbi decoding and postprocessing) was at **epoch 3**.
 
 | Validation metric | F1 |
 |---|---:|
