@@ -4,3 +4,6 @@ pyarrow
 scikit-learn
 tokenizers
 kagglehub
+torch
+tqdm
+wandb
