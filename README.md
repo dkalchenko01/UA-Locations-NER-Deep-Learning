@@ -16,7 +16,7 @@
 We used GroupShuffleSplit to create one fixed validation set. Near-duplicate Ukrainian texts stay in one split; russian sentences are grouped by `doc_id`. All models use the same split for comparison. 
 
 - Removed duplicates and texts with conflicting stored annotations. 
-- Shared split: **seed 17**, Ukrainian **80/20**. To reflect the test language mix (mostly Ukrainian), we subsample russian training data to only **100,000** texts.
+- Shared split: seed 17, Ukrainian 80/20. To reflect the test language mix (mostly Ukrainian), we subsample russian training data to only 100,000 texts.
 
 | Source | Train | Validation |
 |---|---:|---:|
@@ -32,7 +32,7 @@ We used GroupShuffleSplit to create one fixed validation set. Near-duplicate Ukr
 
 **Notebook:** `03_preprocessing.ipynb`
 
-Trained Whitespace and ByteLevel BPE on training text only, with **32,000 tokens** each. Then converted location spans into **BIO labels**. Labels can cover several subword tokens.
+Trained Whitespace and ByteLevel BPE on training text only - 32,000 tokens each. Then converted location spans into **BIO labels**. Labels can cover several subword tokens.
 - ByteLevel had better coverage: 0% unknown test tokens, compared to 2.01% for Whitespace
 - Checked that BIO labels recover the original spans: zero mismatches among aligned examples.
 - Preserved original text and character offsets so predictions can be returned as exact text substrings, including original spelling and punctuation.
@@ -60,3 +60,27 @@ We evaluated the checkpoints using the normalized micro F1 metric. The best resu
 | Combined | 0.88253 |
 
 **Kaggle Public F1: 0.59084**.
+
+## Ensemble
+
+**Notebook:** `05_ensemble.ipynb`
+
+Combined Stacked BiLSTM (ByteLevel BPE) and Stacked BiGRU (Whitespace BPE), both on epoch 3 checkpoints and `viterbi_lines` decoding.
+
+- Different tokenizers were handled through character spans; location names were compared using the official normalization.
+- **Union:** keeps names predicted by either model (increasing Recall).
+- **Intersection:** keeps names predicted by both models (increasing Precision).
+- Shared postprocessing applied to both models before combining predictions.
+- Edge cleanup removes symbols only from the edges of names.
+
+### Results
+
+| Variant | Kaggle Public F1 |
+|---|---:|
+| BiLSTM | 0.57383 |
+| BiGRU | 0.59084 |
+| Union, original cleanup | 0.56549 |
+| Intersection, original cleanup | 0.60645 |
+| Intersection, edge cleanup | **0.60869** |
+
+Intersection with edge cleanup was our best submission.
