@@ -47,7 +47,7 @@ def train_epoch(model, loader, optimizer, device, gradient_clip=1.0):
 
 @torch.no_grad()
 def predict(model, loader, device, decoding="argmax"):
-    if decoding not in ("argmax", "viterbi"):
+    if decoding not in ("argmax", "viterbi", "viterbi_lines"):
         raise ValueError(f"Unknown decoding: {decoding}")
     model.eval()
     predictions = {}
@@ -56,8 +56,11 @@ def predict(model, loader, device, decoding="argmax"):
         ids = batch["input_ids"].to(device)
         labels = batch["labels"].to(device)
         logits = model(ids, batch["lengths"])
-        if decoding == "viterbi":
-            pred_ids = viterbi_decode(logits, [len(r["input_ids"]) for r in batch["records"]])
+        if decoding in ("viterbi", "viterbi_lines"):
+            pred_ids = viterbi_decode(
+                logits, [len(r["input_ids"]) for r in batch["records"]],
+                records=batch["records"] if decoding == "viterbi_lines" else None,
+            )
         else:
             pred_ids = logits.argmax(dim=-1).cpu().tolist()
         losses = F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1),
