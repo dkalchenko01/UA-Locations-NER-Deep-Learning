@@ -361,6 +361,202 @@ Also, this multiword check is based on whitespace separation. It identifies loca
 
 For now, we can use these statistics to evaluate whether validation contains a comparable range of simple and more complex annotated location examples, without modifying the split itself.
 
+prompt:
+i want to use bpe as a tokenizer for my work. tell me how to set it up for our dataset? which parameters influence its performace? i also want to make it flexible so we can try different settings later using the same algorythm
+
+answer:
+For this experiment, we can create two BPE tokenizer configurations that differ only in the pre-tokenization method:
+- Whitespace splits text based on whitespace and word boundaries.
+- ByteLevel works at the byte level, which helps handle different characters and alphabets without relying on a predefined character vocabulary.
+We will keep the vocabulary size and special tokens the same for both tokenizers. This way, the main difference in the experiment will be the pre-tokenization approach.
+
+1. Define tokenizer configurations
+
+First, let's store the parameters in one dictionary instead of hardcoding them inside the tokenizer-building function.
+TOKENIZER_CONFIGS = {    "bpe_whitespace": {        "model": "BPE",        "pre_tokenizer": "Whitespace",        "vocab_size": 32_000,        "special_tokens": ["[PAD]", "[UNK]"],        "seed": 17    },    "bpe_bytelevel": {        "model": "BPE",        "pre_tokenizer": "ByteLevel",        "vocab_size": 32_000,        "special_tokens": ["[PAD]", "[UNK]"],        "seed": 17    }}for name, config in TOKENIZER_CONFIGS.items():    print(name, "->", config)
+
+
+
+Both configurations use:
+- BPE as the tokenizer model.
+- A target vocabulary size of 32,000.
+- [PAD] and [UNK] as special tokens.
+- The same seed value in the configuration.
+2. Import the required components
+
+We use the tokenizers library to construct the BPE tokenizer and its trainer.
+from tokenizers import Tokenizerfrom tokenizers.models import BPEfrom tokenizers.pre_tokenizers import Whitespace, ByteLevelfrom tokenizers.processors import ByteLevel as ByteLevelProcessorfrom tokenizers.trainers import BpeTrainer
+
+
+
+3. Create a reusable tokenizer-building function
+
+Instead of writing separate code for each tokenizer, we can use one function that takes a configuration and builds the corresponding tokenizer and trainer.
+def build_tokenizer(config):    tokenizer = Tokenizer(BPE(unk_token="[UNK]"))    pre_tokenizer = config["pre_tokenizer"]    if pre_tokenizer == "Whitespace":        tokenizer.pre_tokenizer = Whitespace()        alphabet = []    elif pre_tokenizer == "ByteLevel":        tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)        tokenizer.post_processor = ByteLevelProcessor(            trim_offsets=True,            add_prefix_space=False        )        alphabet = ByteLevel.alphabet()    else:        raise ValueError(f"Unknown pre-tokenizer: {pre_tokenizer}")    trainer = BpeTrainer(        vocab_size=config["vocab_size"],        special_tokens=config["special_tokens"],        initial_alphabet=alphabet    )    return tokenizer, trainer
+
+
+
+There are a few important details here:
+- Tokenizer(BPE(unk_token="[UNK]")) initializes a BPE tokenizer.
+- The if statement selects the pre-tokenizer based on the configuration.
+- For Whitespace, we use Whitespace() and an empty initial alphabet.
+- For ByteLevel, we use ByteLevel(add_prefix_space=False) and initialize the trainer with ByteLevel.alphabet().
+- ByteLevelProcessor is used as a post-processor to adjust offsets.
+- BpeTrainer receives the target vocabulary size, special tokens, and initial alphabet.
+The function returns two objects:
+- tokenizer — the tokenizer itself.
+- trainer — the trainer that will learn the BPE vocabulary from training texts.
+4. Build both tokenizer configurations and check them
+
+Now we can iterate through the configurations and build both tokenizers using the same function.
+for name, config in TOKENIZER_CONFIGS.items():    tokenizer, trainer = build_tokenizer(config)    print(name)    print("  Model:", type(tokenizer.model).__name__)    print("  Pre-tokenizer:", tokenizer.pre_tokenizer)    print("  Target vocab size:", config["vocab_size"])
+
+
+
+Expected output:
+bpe_whitespace
+  Model: BPE
+  Pre-tokenizer: Whitespace()
+  Target vocab size: 32000
+
+bpe_bytelevel
+  Model: BPE
+  Pre-tokenizer: ByteLevel(add_prefix_space=False, trim_offsets=True, use_regex=True)
+  Target vocab size: 32000
+
+
+What we have at this stage
+We now have two tokenizer setups with the same BPE model, vocabulary size, and special tokens, but different pre-tokenization strategies.
+
+This gives us a controlled starting point for comparing how Whitespace and ByteLevel handle Ukrainian, Russian, mixed-language texts, and potentially unusual characters in our NER dataset.
+
+One important distinction: these cells only initialize the tokenizers and trainers. They do not train the vocabulary yet. Training will happen later using the training texts.
+
+Also, although seed is stored in both configurations, this function does not actually use it. It is configuration metadata at this stage, not an applied random seed.
+
+prompt:
+i want to check if both tokenizers preserve the correct positions of loc names in the original texts. can we compare how well they match the annotated spans and everything else that is important. i am especially interested in whether the byte level tokenizer has any offset troubles.
+
+answer:
+
+We can check this by comparing the character offsets returned by each tokenizer with the annotated location spans from `loc_markers`.
+
+First, let's define a function that checks whether each annotated span matches the tokenizer offsets:
+- `exact` — the tokens cover exactly the annotated span.
+- `partial` — the tokens overlap with the span, but the boundaries don't match.
+- `missing` — no token overlaps with the annotated span.
+
+**Cell 1 — Check span alignment**
+
+```python
+def check_span_alignment(encoding, spans):
+    results = []
+
+    for start, end in spans:
+        overlapping = [
+            (a, b) for a, b in encoding.offsets
+            if a < end and b > start
+        ]
+
+        if not overlapping:
+            results.append("missing")
+        elif overlapping[0][0] == start and overlapping[-1][1] == end:
+            results.append("exact")
+        else:
+            results.append("partial")
+
+    return results
+```
+
+Next, we can evaluate both tokenizers on the training datasets and count the alignment results.
+
+**Cell 2 — Evaluate alignment**
+
+```python
+from collections import Counter
+
+def evaluate_alignment(tokenizer, df):
+    counts = Counter()
+
+    for row in df.itertuples(index=False):
+        spans = parse_spans(row.loc_markers)
+        if not spans:
+            continue
+
+        encoding = tokenizer.encode(row.text, add_special_tokens=False)
+        counts.update(check_span_alignment(encoding, spans))
+
+    return counts
+```
+
+```python
+for split_name, df in tokenizer_eval.items():
+    print(f"\n{split_name}")
+
+    for name, candidate_tokenizer in tokenizers.items():
+        counts = evaluate_alignment(candidate_tokenizer, df)
+        total = sum(counts.values())
+        exact_pct = 100 * counts["exact"] / total if total else 0
+
+        print(f"{name}: {dict(counts)} | Exact: {exact_pct:.2f}%")
+```
+
+**Results:**
+
+```text
+uk_train
+bpe_whitespace: {'exact': 1724, 'partial': 8} | Exact: 99.54%
+bpe_bytelevel: {'exact': 1724, 'partial': 8} | Exact: 99.54%
+
+ru_train
+bpe_whitespace: {'exact': 2229, 'partial': 3} | Exact: 99.87%
+bpe_bytelevel: {'exact': 2227, 'partial': 5} | Exact: 99.78%
+```
+
+Both tokenizers show very high alignment accuracy. However, the ByteLevel tokenizer has slightly more partial alignments on the Russian training data.
+
+To understand why these cases occur, let's inspect the actual location names, their surrounding text, annotated spans, and overlapping tokens.
+
+**Cell 3 — Inspect partial alignments**
+
+```python
+def inspect_partial_alignment(tokenizer, df):
+    for row in df.itertuples(index=False):
+        spans = parse_spans(row.loc_markers)
+        if not spans:
+            continue
+
+        encoding = tokenizer.encode(row.text, add_special_tokens=False)
+        results = check_span_alignment(encoding, spans)
+
+        for (start, end), result in zip(spans, results):
+            if result != "partial":
+                continue
+
+            overlapping = [
+                (token, a, b)
+                for token, (a, b) in zip(encoding.tokens, encoding.offsets)
+                if a < end and b > start
+            ]
+
+            print("Location:", repr(row.text[start:end]))
+            print("Context:", repr(row.text[max(0, start-30):end+30]))
+            print("Annotation:", (start, end))
+            print("Tokens:", overlapping)
+            print("-" * 60)
+```
+
+```python
+for split_name, df in tokenizer_eval.items():
+    for name, candidate_tokenizer in tokenizers.items():
+        print(f"\n{split_name} | {name}")
+        inspect_partial_alignment(candidate_tokenizer, df)
+```
+
+This will help us identify whether the partial matches are caused by token boundaries or by differences in how the tokenizer handles particular characters.
+
+One important distinction: this code **diagnoses alignment issues; it does not fix them**. The ByteLevel post-processor was configured earlier. We should inspect the problematic examples before deciding whether any further changes are necessary.
+
 
 Промпт:
 давай почнемо з самої моделі stacked bigru. у нас в src/model.py вже є bigrutagger але він одношаровий а я хочу спробувати stacked архітектуру як у нашої bilstm яка дала найкращий результат
