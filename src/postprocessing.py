@@ -1,114 +1,62 @@
-"""Postprocessing of predicted location strings for UA Locations NER.
+"""Inference-only location cleanup and word-boundary experiments."""
 
-This module does NOT alter BIO tags, offsets, model weights, or the official
-competition metric. Use the same version for validation and Kaggle inference
-when comparing a postprocessing strategy.
-
-Versions (historical notebook naming):
-    raw              No changes (original BiLSTM baseline).
-    strip            Strip surrounding whitespace and remove empty predictions.
-    clean_v2         Strip + remove Unicode 'So' characters (includes many emoji).
-    clean_v3         clean_v2 + discard predictions without a letter or digit.
-    remove_non_alnum Teammate's original filter, applied without prior cleaning.
-
-Note: 'So' is a Unicode category, NOT an exhaustive emoji detector. It also
-includes non-emoji symbols and excludes some components of emoji sequences.
-"""
-
-from __future__ import annotations
-
-import json
 import unicodedata
-from typing import Sequence
 
-POSTPROCESSING_VERSIONS = (
-    "raw",
-    "strip",
-    "clean_v2",
-    "clean_v3",
-    "remove_non_alnum",
-)
+from src.metrics import hard_processing
+from src.preprocessing import clean_locations_v3
 
+EDGE_CHARS = ' \t\r\n,;:!?…|•"«»“”„'
+CONNECTORS = "'’ʼ-‐‑"
 
-def _validated_locations(locations: Sequence[str]) -> list[str]:
-    """Return a copy, rejecting a single string and non-string list entries."""
-    if isinstance(locations, (str, bytes)):
-        raise TypeError("Expected a sequence of location strings, not a string")
-    result = list(locations)
-    if not all(isinstance(location, str) for location in result):
-        raise TypeError("Each location must be a string")
-    return result
+VARIANTS = {
+    "v3": {},
+    "v4_empty": {"empty": True},
+    "v4_edges": {"trim": True},
+    "v4_words": {"expand": True},
+    "v4_combined": {"expand": True, "trim": True, "empty": True},
+    "v5": {"expand": False, "trim": True, "empty": True},
+}
 
 
-def clean_locations(locations: Sequence[str]) -> list[str]:
-    """Original notebook `strip` strategy."""
-    cleaned = [location.strip() for location in _validated_locations(locations)]
-    return [location for location in cleaned if location]
-
-
-def clean_locations_v2(locations: Sequence[str]) -> list[str]:
-    """Original notebook `clean_v2`: drop category So, strip, remove empties."""
-    cleaned = []
-    for location in _validated_locations(locations):
-        location = "".join(
-            char for char in location
-            if unicodedata.category(char) != "So"
-        ).strip()
-        if location:
-            cleaned.append(location)
-    return cleaned
-
-
-def remove_non_alnum(locations: Sequence[str]) -> list[str]:
-    """Keep only strings containing at least one alphanumeric character.
-
-    Does not modify the retained strings (matching the teammate's function).
-    """
-    return [
-        location for location in _validated_locations(locations)
-        if any(char.isalnum() for char in location)
-    ]
-
-
-def clean_locations_v3(locations: Sequence[str]) -> list[str]:
-    """Original notebook `clean_v3`: clean_v2 then remove_non_alnum."""
-    return remove_non_alnum(clean_locations_v2(locations))
-
-
-def postprocess_locations(
-    locations: Sequence[str],
-    version: str = "raw",
-) -> list[str]:
-    """Apply an explicitly chosen postprocessing version to location strings."""
-    if version == "raw":
-        return _validated_locations(locations)
-    if version == "strip":
-        return clean_locations(locations)
-    if version == "clean_v2":
-        return clean_locations_v2(locations)
-    if version == "clean_v3":
-        return clean_locations_v3(locations)
-    if version == "remove_non_alnum":
-        return remove_non_alnum(locations)
-    raise ValueError(
-        f"Unknown postprocessing version: {version!r}. "
-        f"Choose one of {POSTPROCESSING_VERSIONS}."
+def word_char(text, i):
+    ch = text[i]
+    return (
+        ch.isalnum()
+        or unicodedata.category(ch).startswith("M")
+        or (
+            ch in CONNECTORS
+            and 0 < i < len(text) - 1
+            and text[i - 1].isalnum()
+            and text[i + 1].isalnum()
+        )
     )
 
 
-def parse_locations(value: str | Sequence[str]) -> list[str]:
-    """Read a locations list or a JSON-encoded locations list (e.g. CSV cell)."""
-    if isinstance(value, str):
-        value = json.loads(value)
-    return _validated_locations(value)
+def restore_word(text, start, end):
+    if start > 0 and start < end:
+        if word_char(text, start - 1) and word_char(text, start):
+            while start > 0 and word_char(text, start - 1):
+                start -= 1
+
+    if 0 < end < len(text):
+        if word_char(text, end - 1) and word_char(text, end):
+            while end < len(text) and word_char(text, end):
+                end += 1
+
+    return start, end
 
 
-def serialize_locations(
-    locations: str | Sequence[str],
-    version: str = "raw",
-) -> str:
-    """Serialize a Kaggle CSV cell as UTF-8-friendly JSON after processing."""
-    return json.dumps(
-        postprocess_locations(parse_locations(locations), version=version),
-        ensure_ascii=False,
-    )
+def postprocess(text, spans, expand=False, trim=False, empty=False):
+    locations = []
+    for start, end in spans:
+        if expand and sum(ch.isalpha() for ch in text[start:end]) > 4:
+            start, end = restore_word(text, start, end)
+        location = text[start:end]
+        if trim:
+            location = location.strip(EDGE_CHARS)
+        locations.append(location)
+
+    locations = clean_locations_v3(locations)
+    if empty:
+        locations = [location for location in locations if hard_processing(location) != ""]
+    return locations
