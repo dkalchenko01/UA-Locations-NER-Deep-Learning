@@ -37,6 +37,34 @@ Trained Whitespace and ByteLevel BPE on training text only - 32,000 tokens each.
 - Checked that BIO labels recover the original spans: zero mismatches among aligned examples.
 - Preserved original text and character offsets so predictions can be returned as exact text substrings, including original spelling and punctuation.
 
+## Stacked BiLSTM
+
+**Notebook:** `04_bilstm_stacked.ipynb`
+
+We created a **3-layer bidirectional LSTM**, reusing the existing training and evaluation pipeline. The hyperparameters were chosen through two rounds of W&B grid search:
+1. Learning rate × dropout: learning rates of 0.0003, 0.001, and 0.003, combined with dropout rates of 0.2 and 0.4, for five epochs per run.
+2. Hidden size × batch size: hidden sizes of 128, 256, and 384 per direction, combined with batch sizes of 64 and 128, for three epochs per run, keeping the learning rate at 0.001 and dropout at 0.2.
+
+Increasing the depth from two to three layers improved Kaggle performance, while a fourth layer provided no further improvement. Higher dropout (0.4) and the tested chunked-inference configuration also reduced the Public score. The final combination of viterbi_lines and postprocessing achieved 0.57383 Kaggle Public F1, compared with 0.56551 using clean_v3 alone. Across experiments, improvements on the original validation set did not consistently translate into higher Kaggle scores.
+
+- **Tokenizer:** ByteLevel BPE, vocabulary size 32,000
+- **Architecture:** trainable 128-dimensional embeddings -> 3 bidirectional LSTM layers (hidden size 256 per direction) -> dropout 0.2 -> linear classifier predicting O/B-LOC/I-LOC
+- **Training:** Adam optimizer, learning rate 0.001, batch size 128, seed 17, trained for 5 epochs
+- **Inference:** full-message prediction, followed by BIO-constrained Viterbi decoding with line-break constraints (`viterbi_lines`)
+- **Postprocessing:** word-boundary expansion, edge trimming, `clean_v3`, removal of predictions with empty locations
+
+**Results**
+
+We evaluated the checkpoints using the normalized micro F1 metric. The best result (after Viterbi decoding and postprocessing) was at **epoch 3**.
+
+| Validation metric | F1 |
+|---|---:|
+| Ukrainian | 0.88636 |
+| russian | 0.91251 |
+| Combined | 0.89295 |
+
+**Kaggle Public F1: 0.57383**.
+
 ## Stacked BiGRU
 
 **Notebook:** `04_bigru_stacked.ipynb`
