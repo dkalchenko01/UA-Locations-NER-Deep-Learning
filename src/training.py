@@ -9,6 +9,7 @@ from torch.nn import functional as F
 from tqdm.auto import tqdm
 
 from src.dataset import ID_TO_LABEL, IGNORE_INDEX
+from src.decoding import viterbi_decode
 from src.preprocessing import bio_to_spans
 
 
@@ -45,7 +46,9 @@ def train_epoch(model, loader, optimizer, device, gradient_clip=1.0):
 
 
 @torch.no_grad()
-def predict(model, loader, device):
+def predict(model, loader, device, decoding="argmax"):
+    if decoding not in ("argmax", "viterbi"):
+        raise ValueError(f"Unknown decoding: {decoding}")
     model.eval()
     predictions = {}
     loss_sums, token_counts = {}, {}
@@ -53,7 +56,10 @@ def predict(model, loader, device):
         ids = batch["input_ids"].to(device)
         labels = batch["labels"].to(device)
         logits = model(ids, batch["lengths"])
-        pred_ids = logits.argmax(dim=-1).cpu().tolist()
+        if decoding == "viterbi":
+            pred_ids = viterbi_decode(logits, [len(r["input_ids"]) for r in batch["records"]])
+        else:
+            pred_ids = logits.argmax(dim=-1).cpu().tolist()
         losses = F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1),
                                  ignore_index=IGNORE_INDEX, reduction="none")
         losses = losses.reshape_as(labels).sum(dim=1).cpu().tolist()

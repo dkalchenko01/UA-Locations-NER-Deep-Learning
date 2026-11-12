@@ -14,6 +14,7 @@ VARIANTS = {
     "v4_edges": {"trim": True},
     "v4_words": {"expand": True},
     "v4_combined": {"expand": True, "trim": True, "empty": True},
+    "v5": {"expand": False, "trim": True, "empty": True},
 }
 
 
