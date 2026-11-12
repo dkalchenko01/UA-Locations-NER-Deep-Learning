@@ -362,6 +362,551 @@ Also, this multiword check is based on whitespace separation. It identifies loca
 For now, we can use these statistics to evaluate whether validation contains a comparable range of simple and more complex annotated location examples, without modifying the split itself.
 
 
+Промпт:
+давай почнемо з самої моделі stacked bigru. у нас в src/model.py вже є bigrutagger але він одношаровий а я хочу спробувати stacked архітектуру як у нашої bilstm яка дала найкращий результат
+можеш створити окремий bigru_model з класом stackedbigrutagger? хочу щоб архітектура була максимально схожа на bilstmtagger тільки замість lstm використовувалась gru. треба щоб можна було змінювати num_layers hidden_size embedding_dim і dropout для майбутнього sweep
+за замовчуванням давай 3 шари hidden 256 embedding 128 і dropout 0.2. важливо щоб модель працювала з нашим існуючим training.py і повертала logits для o b-loc i-loc на кожен токен. і треба правильно обробляти padding і різні довжини повідомлень бо в kaggle test вони значно довші ніж у train
+просто напиши сам клас моделі
+
+Відповідь:
+Так, створимо окремий StackedBiGRUTagger, не змінюючи наявні моделі. Збережемо ту саму структуру, що й у BiLSTM, щоб потім можна було порівнювати архітектури та використовувати спільний training pipeline.
+Файл bigru_model.py:
+
+
+"""Stacked bidirectional GRU token classifier, compatible with src.training."""
+
+from torch import nn
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+
+
+class StackedBiGRUTagger(nn.Module):
+    def __init__(self, vocab_size, pad_id=0, embedding_dim=128,
+                 hidden_size=256, num_layers=3, dropout=0.2, num_labels=3):
+        super().__init__()
+
+        if num_layers < 1 or vocab_size < 1 or embedding_dim < 1 or hidden_size < 1:
+            raise ValueError("Model dimensions must be positive")
+        if not 0 <= dropout < 1:
+            raise ValueError("dropout must be in [0, 1)")
+
+        self.embedding = nn.Embedding(
+            vocab_size, embedding_dim, padding_idx=pad_id
+        )
+
+        self.gru = nn.GRU(
+            input_size=embedding_dim,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+        )
+
+        self.dropout = nn.Dropout(dropout)
+        self.classifier = nn.Linear(hidden_size * 2, num_labels)
+
+    def forward(self, input_ids, lengths):
+        embedded = self.embedding(input_ids)
+
+        packed = pack_padded_sequence(
+            embedded,
+            lengths.cpu(),
+            batch_first=True,
+            enforce_sorted=False,
+        )
+
+        encoded, _ = self.gru(packed)
+
+        encoded, _ = pad_packed_sequence(
+            encoded,
+            batch_first=True,
+            total_length=input_ids.size(1),
+        )
+
+        return self.classifier(self.dropout(encoded))
+
+. Що тут реалізовано
+* nn.Embedding перетворює ID токенів на вектори розмірності 128. Поки embeddings випадково ініціалізовані та навчаються разом із моделлю.  
+* nn.GRU обробляє послідовність у двох напрямках (bidirectional=True). Використовуємо три рекурентні шари за замовчуванням.  
+* pack_padded_sequence() дозволяє GRU не обробляти зайвий padding усередині послідовностей.  
+* pad_packed_sequence() повертає результат до розміру батча.  
+* nn.Linear перетворює 512 ознак (256 із кожного напрямку) на три BIO logits для кожного токена.  
+Для вхідного батча розмірності [batch, sequence_length] отримаємо:
+
+input_ids     [batch, sequence_length]
+embedding     [batch, sequence_length, 128]
+BiGRU output  [batch, sequence_length, 512]
+classifier    [batch, sequence_length, 3]
+
+Ми не використовуємо pooling і не обрізаємо послідовності всередині моделі, оскільки для NER потрібно передбачити мітку для кожного токена.
+Наступним кроком можна буде підключити цей клас до існуючих train_epoch() і predict(), а потім створити навчальний ноутбук та sweep.
+
+
+Промпт:
+давай тепер подумаємо про збереження результатів бо я буду тренувати Stacked BiGRU в colab і не хочу втратити чекпоінти чи конфіги якщо сесія завершиться
+у нас уже є папка на google drive яку я монтую в ноутбуці. можеш написати невелику функцію backup_files яка прийматиме шлях до цієї папки і список файлів які треба скопіювати? хочу щоб вона спочатку перевіряла що файл існує і щоб копіювання було безпечним, наприклад через тимчасовий файл щоб не залишити пошкоджену копію якщо щось піде не так
+думаю я винесу це в окремий src/bigru_helpers.py бо потім я хочу додати туди ще кілька допоміжних функцій
+
+Так, зробимо невеликий helper, який зможемо викликати після збереження checkpoints, конфігурацій або результатів evaluation.
+Важливо: спочатку зберігаємо файл локально, а вже потім копіюємо його на Drive.
+src/bigru_helpers.py
+
+
+import shutil
+from pathlib import Path
+
+
+def backup_files(destination, *files):
+    """Copy completed files to Google Drive using temporary copies."""
+    if destination is None:
+        return
+
+    folder = Path(destination)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    for source in files:
+        source = Path(source)
+
+        if not source.is_file():
+            raise FileNotFoundError(source)
+
+        target = folder / source.name
+        temporary = folder / (source.name + ".tmp-copy")
+
+        try:
+            shutil.copy2(source, temporary)
+            temporary.replace(target)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+Тут shutil.copy2() копіює файл разом із його metadata, а temporary.replace(target) замінює фінальний файл лише після завершення копіювання.
+Якщо копіювання завершиться помилкою, функція не приховає її. Це важливо, щоб ми не думали, що checkpoint збережений, коли насправді backup не вдався.
+Після цього можна використовувати:
+ backup_files(
+    backup_dir,
+    run_dir / "config.json",
+    run_dir / "provenance.json"
+)
+
+
+Промпт:
+тепер хочу додати оцінювання predictions після postprocessing. у нас вже є postprocess в src/postprocessing.py і офіційна comp_metric тому нічого нового для очищення чи метрики писати не потрібно
+мені треба функція яка прийматиме validation records і predictions застосовуватиме ті самі опції що використовувалися для найкращого bilstm submission (expand=true trim=true empty=true) а потім рахуватиме competition f1 окремо для uk ru і combined
+важливо не змінювати саму метрику бо ми хочемо порівнювати gru з lstm. і було б добре щоб clean_options можна було передати окремо якщо потім захочемо спробувати інший postprocessing. я додам це в bigru_helpers.py
+
+Відповідь:
+Так, використаємо існуючі postprocess() і comp_metric(). Нова функція лише підготує predictions у потрібному форматі й обчислить F1.
+Додамо до src/bigru_helpers.py:
+
+
+from src.metrics import comp_metric
+from src.postprocessing import postprocess
+
+
+CLEAN_OPTIONS = {"expand": True, "trim": True, "empty": True}
+
+
+def postprocessed_scores(records, predictions, clean_options=None):
+    """Compute competition F1 after postprocessing."""
+    options = CLEAN_OPTIONS if clean_options is None else clean_options
+
+    by_source = dict.fromkeys([r["source"] for r in records])
+    truth = {s: [] for s in by_source}
+    guess = {s: [] for s in by_source}
+
+    for record in records:
+        source = record["source"]
+
+        truth[source].append(record["gold_locations"])
+        guess[source].append(
+            postprocess(
+                record["text"],
+                predictions[record["text_id"]]["spans"],
+                **options
+            )
+        )
+
+    scores = {
+        f"{source}_comp_f1": comp_metric(truth[source], guess[source])
+        for source in by_source
+    }
+
+    scores["combined_comp_f1"] = comp_metric(
+        [item for source in by_source for item in truth[source]],
+        [item for source in by_source for item in guess[source]]
+    )
+
+    return scores
+
+Функція працює так:
+1. Для кожного validation record бере справжні локації з gold_locations.  
+2. Отримує передбачені spans із predictions.  
+3. Застосовує до них postprocess().  
+4. Рахує competition F1 окремо для кожного джерела та для всіх повідомлень разом.  
+Наприклад:
+
+scores = postprocessed_scores(val_records, val_predictions)
+
+print(scores)
+
+Отримаємо словник з uk_comp_f1, ru_comp_f1 та combined_comp_f1, якщо source у records має значення uk і ru.
+Так ми зможемо перевіряти, як змінюється F1 після очищення, не втручаючись у реалізацію офіційної метрики.
+
+
+
+Промпт:
+дивись, я хочу нормально зберігати інформацію про кожен запуск stacked bigru щоб потім можна було відтворити результати і не заплутатися в чекпоінтах. можеш написати код для provenance який збере run id, seed, версії python і бібліотек, gpu/cuda, git commit і status,хеші токенізатора, validation manifest, всіх python файлів у src і самого ноутбука? тільки врахуй, що ноутбука може не бути локально в репо, бо я запускаю його в colab. і ще треба зберегти config та provenance в json і зробити backup на drive, у нас для цього вже є save_json і backup_files
+
+Відповідь:
+Так, давай зробимо окрему клітинку для збереження metadata експерименту. Це не впливатиме на навчання, але дозволить потім визначити, з якою версією коду, tokenizer і даних був отриманий checkpoint.
+import platform
+import subprocess
+from importlib.metadata import version
+
+provenance = {
+    "run_id": run_id,
+    "seed": config["seed"],
+    "python": platform.python_version(),
+    "git_revision": subprocess.run(
+        ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+        capture_output=True, text=True
+    ).stdout.strip() or None,
+    "git_status": subprocess.run(
+        ["git", "-C", str(repo_dir), "status", "--short"],
+        capture_output=True, text=True
+    ).stdout.strip(),
+    "packages": {
+        name: version(name)
+        for name in ["torch", "tokenizers", "numpy", "pandas",
+                     "pyarrow", "tqdm", "wandb"]
+    },
+    "device": str(device),
+    "cuda": torch.version.cuda,
+    "gpu": torch.cuda.get_device_name(0),
+    "tokenizer_sha256": file_sha256(tokenizer_path),
+    "manifest_sha256": file_sha256(
+        splits_dir / "validation_manifest.parquet"
+    ),
+    "source_sha256": {
+        path.name: file_sha256(path)
+        for path in sorted((repo_dir / "src").glob("*.py"))
+    },
+    "notebook_sha256": (
+        file_sha256(repo_dir / "notebooks/04_bigru_stacked.ipynb")
+        if (repo_dir / "notebooks/04_bigru_stacked.ipynb").is_file()
+        else None
+    ),
+}
+
+save_json(run_dir / "config.json", config)
+save_json(run_dir / "provenance.json", provenance)
+
+backup_files(
+    backup_dir,
+    run_dir / "config.json",
+    run_dir / "provenance.json",
+    tokenizer_path
+)
+
+Тут ми зберігаємо два окремі файли: config.json із гіперпараметрами та provenance.json із технічною інформацією про запуск.
+Для ноутбука додали перевірку is_file(): якщо він відкритий у Colab, але відсутній у клонованому репозиторії, записуємо None замість FileNotFoundError.
+Важливо: source_sha256 допоможе відстежувати навіть незакомічені зміни в Python-модулях, а tokenizer_sha256 — переконатися, що для inference чи ensemble використовується саме той Whitespace BPE, з яким навчалася модель.
+
+
+Промпт:
+тепер хочу підключити wandb для нашого stacked bigru щоб логувати навчання і потім нормально порівнювати результати зі sweep та bilstm. у нас вже є функція start_run в experiment_tracking.py тому давай її використаємо, не треба писати все з нуля. хочу щоб зберігалися config, provenance, інформація про tokenizer і validation split а також щоб run мав нормальну назву і теги, по яких його можна знайти. і ще треба зберегти id та посилання на wandb run у json і зробити backup на drive
+
+Відповідь:
+Так, використаємо вашу готову start_run(), щоб усі експерименти BiGRU і BiLSTM логувалися в одному форматі.
+
+os.environ["WANDB_DIR"] = str(run_dir)
+
+run = start_run(
+    model="bigru",
+    config=config,
+    name=run_id,
+    validation_version=config["validation_version"],
+    metric_version=config["metric_version"],
+    postprocessing_version="raw",
+    repo_dir=repo_dir,
+    split_manifest_path=splits_dir / "validation_manifest.parquet",
+    tokenizer_path=tokenizer_path,
+    provenance=provenance,
+    tags=["stacked", "bigru", "whitespace-bpe", "control"],
+)
+
+save_json(run_dir / "wandb_run.json", {
+    "id": run.id,
+    "url": run.url,
+    "path": f"{run.entity}/{run.project}/{run.id}",
+})
+
+backup_files(backup_dir, run_dir / "wandb_run.json")
+
+print(run.url)  Тут start_run() створює новий W&B run для Stacked BiGRU та передає йому конфігурацію експерименту, provenance, tokenizer і validation manifest.
+Теги stacked, bigru, whitespace-bpe та control допоможуть відфільтрувати саме цей експеримент у W&B.
+postprocessing_version="raw" означає, що на цьому етапі ми відстежуємо результати без додаткового очищення predictions. Пізніше окремо зможемо записати метрики після viterbi_lines і postprocessing.
+Наприкінці зберігаємо wandb_run.json з ID, URL і шляхом запуску, а backup_files() копіює його на Google Drive.
+Важливо: ця клітинка лише створює W&B run. Самі train loss, validation F1 та інші метрики будемо записувати під час навчання через log_epoch().
+
+
+Промпт:
+ще одне питання щодо майбутнього ensemble. моя колега буде об'єднувати stacked bilstm і мою bigru але в них різні токенізатори, у lstm bytelevel bpe а в bigru whitespace bpe
+наскільки я розумію, просто усереднити logits по токенах не вийде,бо токени та їхні позиції можуть відрізнятися. можеш додати функцію яка збереже logits нашої bigru разом із символьними offsets кожного токена щоб колега потім могла їх правильно вирівняти?
+хочу зберігати це в jsonl по одному запису на повідомлення з text_id, offsets і logits. без postprocessing і без gold labels. функція має працювати з нашим існуючим model і dataloader і бажано не тримати всі предікшени одночасно в пам'яті
+
+Відповідь:
+Так, ти правильно розумієш: якщо моделі використовують різні токенізатори, кількість токенів і їхні межі можуть відрізнятися.
+Тому безпосереднє усереднення logits за індексами токенів буде некоректним. Натомість збережемо logits разом із символьними offsets, щоб у майбутньому можна було зіставити передбачення моделей із відповідними фрагментами оригінального тексту.
+Додамо до src/bigru_helpers.py:
+
+
+import json
+import torch
+from pathlib import Path
+from tqdm.auto import tqdm
+
+
+@torch.no_grad()
+def export_token_logits_jsonl(model, loader, device, path):
+    """Export token logits with original-text character offsets."""
+    model.eval()
+    path = Path(path)
+
+    with path.open("w", encoding="utf-8") as stream:
+        for batch in tqdm(loader, desc="Export logits"):
+            logits = model(
+                batch["input_ids"].to(device),
+                batch["lengths"]
+            )
+
+            lengths = batch["lengths"].tolist()
+
+            for record, row, length in zip(
+                batch["records"], logits.cpu(), lengths
+            ):
+                n = len(record["input_ids"])
+
+                if not n:
+                    scores, offsets = [], []
+                else:
+                    scores = row[:n].tolist()
+                    offsets = record["offsets"].tolist()
+
+                stream.write(json.dumps({
+                    "text_id": record["text_id"],
+                    "offsets": offsets,
+                    "logits": scores,
+                }, ensure_ascii=False) + "\n")
+
+    return path
+
+Тут @torch.no_grad() вимикає обчислення градієнтів, оскільки ми тільки отримуємо predictions, а не навчаємо модель.
+Функція обробляє батчі по черзі та відразу записує результати у файл. Це дозволяє не накопичувати logits для всього test set у RAM.
+Для кожного повідомлення зберігається:
+
+{
+  "text_id": 123,
+  "offsets": [[0, 4], [5, 10]],
+  "logits": [[1.2, -0.4, 0.3], [-0.7, 1.5, 0.2]]
+}
+
+Це лише приклад структури JSONL, не реальні результати моделі.
+Кожен масив із трьох чисел відповідає logits для O, B-LOC, I-LOC.
+Після цього колега зможе вирівнювати передбачення BiGRU та BiLSTM за символьними координатами, а не за позицією токена.
+Важливо, що це будуть raw logits до Viterbi та postprocessing. Тому для ensemble на рівні logits ще знадобиться окремо реалізувати вирівнювання токенів і об'єднання оцінок моделей.
+
+
+Промпт:
+дивись моя колега зараз працює над ensemble з нашої stacked bigru і stacked bilstm. вона дала мені функції _prediction_rows і export_predictions (код додаю нижче) які мають зберігати predictions для validation і test у jsonl. допоможи мені використати їх у нашому ноутбуці
+важливо, щоб ми взяли саме selected_checkpoint, який обрали після evaluation, і використовували viterbi_lines, але без додаткового postprocessing бо колезі потрібні оригінальні spans та offsets. у нас уже є model, val_records, val_loader, test_records і test_loader, тому не хочу створювати все це заново. і давай зберігати результати в окрему папку з timestamp, щоб нічого не перезаписати
+
+import json
+from numbers import Integral
+from pathlib import Path
+
+def _prediction_rows(records, predictions):
+    ids = [record["text_id"] for record in records]
+    if not ids or len(ids) != len(set(ids)):
+        raise ValueError("Records must be nonempty and have unique IDs")
+    if set(ids) != set(predictions):
+        raise ValueError("Missing or extra prediction IDs")
+
+    rows = []
+    for record in records:
+        text = record["text"]
+        if not isinstance(text, str):
+            raise ValueError("Records must contain original text strings")
+        spans = []
+        for start, end in predictions[record["text_id"]]["spans"]:
+            if (isinstance(start, bool) or isinstance(end, bool)
+                    or not isinstance(start, Integral) or not isinstance(end, Integral)
+                    or not 0 <= start < end <= len(text)):
+                raise ValueError(f"Invalid span for {record['text_id']!r}")
+            spans.append([int(start), int(end)])
+
+        text_id = record["text_id"]
+        if isinstance(text_id, Integral) and not isinstance(text_id, bool):
+            text_id = int(text_id)
+        elif not isinstance(text_id, str):
+            raise ValueError("IDs must be strings or integers")
+        rows.append({"text_id": text_id, "text": text, "spans": spans})
+    return rows
+
+
+def export_predictions(output_dir, checkpoint_path, model, predict_fn,
+                       val_records, val_loader, test_records, test_loader):
+    """Load a trusted local checkpoint and export both splits to a NEW folder.
+
+    predict_fn must use the supplied model and must not reload weights, train,
+    clean predictions, or change text/offsets. Existing output folders are refused.
+    Matching architecture and tokenizer must already be prepared by the notebook.
+    """
+    import torch
+
+    output_dir = Path(output_dir)
+    if output_dir.exists():
+        raise FileExistsError(f"Choose a new run folder: {output_dir}")
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+    print("Checkpoint:", checkpoint_path, "epoch:", checkpoint.get("epoch"))
+    del checkpoint
+
+    with torch.no_grad():
+        val_predictions, _ = predict_fn(model, val_loader)
+        val_rows = _prediction_rows(val_records, val_predictions)
+        del val_predictions
+        test_predictions, _ = predict_fn(model, test_loader)
+        test_rows = _prediction_rows(test_records, test_predictions)
+        del test_predictions
+
+    # Validate both splits before creating any output files.
+    output_dir.mkdir(parents=True, exist_ok=False)
+    for filename, rows in [("val.jsonl", val_rows), ("test.jsonl", test_rows)]:
+        with (output_dir / filename).open("x", encoding="utf-8") as file:
+            for row in rows:
+                file.write(json.dumps(row, ensure_ascii=False) + "\n")
+        print(filename, len(rows), "texts")
+    return output_dir
+
+Відповідь: Так, можемо використати вже підготовлені модель і DataLoaders. Функція колеги сама завантажить ваги selected_checkpoint, виконає inference для обох наборів і збереже результати у форматі JSONL.  from datetime import datetime, timezone
+
+def predict_for_ensemble(model, loader):
+    return predict(model, loader, device, decoding="viterbi_lines")
+
+output_dir = (
+    root / "outputs" / "ensemble_exports"
+    / f"bigru_ensemble_{datetime.now(timezone.utc):%Y%m%d_%H%M%S_%f}"
+)
+
+export_predictions(
+    output_dir=output_dir,
+    checkpoint_path=selected_checkpoint,
+    model=model,
+    predict_fn=predict_for_ensemble,
+    val_records=val_records,
+    val_loader=val_loader,
+    test_records=test_records,
+    test_loader=test_loader,
+)
+
+print("Export completed:", output_dir)  Отримаємо два файли: val.jsonl та test.jsonl. У кожному рядку будуть text_id, оригінальний text і spans у вигляді символьних координат.
+Зверни увагу, що viterbi_lines уже є способом декодування BIO-міток, а додаткове очищення (clean_v3, expand, trim) тут не застосовується.
+
+
+
+
+
+Промпт:
+окей тепер хочу швидко перевірити що export нормально спрацював. можеш написати невелику клітинку яка прочитає ці val.jsonl і test.jsonl, покаже кількість записів і розмір файлів, а ще виведе один приклад щоб я побачила що саме ми зберегли? не треба якихось складних перевірок бо функція колеги вже валідує предікшени
+
+Відповідь:
+Так, тут достатньо короткої клітинки. Прочитаємо JSONL, порахуємо кількість записів і подивимося на перший приклад.
+
+import json
+
+for filename, expected_count in [
+    ("val.jsonl", len(val_records)),
+    ("test.jsonl", len(test_records)),
+]:
+    filepath = output_dir / filename
+
+    with filepath.open("r", encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f]
+
+    print(
+        filename,
+        ", Rows:", len(rows),
+        ", Size MB:", round(filepath.stat().st_size / 1e6, 2)
+    )
+
+    print("Example:", rows[0]) 
+Тут json.loads() перетворює кожен рядок JSONL на Python-словник. stat().st_size повертає розмір файлу в байтах, який ми переводимо в мегабайти.
+expected_count поки не використовується — якщо хочеш, можна додати assert len(rows) == expected_count, але для простого перегляду результатів це необов'язково.
+
+
+
+
+Промпт:
+супер, тепер треба зберегти ці файли на google drive щоб колега могла їх забрати і почати роботу над ensemble. у нас є спільна папка /content/drive/MyDrive/ner_results/shared, хочу щоб результати bigru лежали в окремій підпапці
+можеш скопіювати туди всю папку з предікшенами, чекпоінт моделі і tokenizer? треба щоб нічого не перезаписувалося. і давай наприкінці перевіримо що всі чотири файли збереглися
+
+Відповідь:
+Так, збережемо все в shared/bigru, щоб колега мала і готові predictions, і файли, потрібні для відтворення inference. 
+import shutil
+
+drive_export_root = (
+    Path("/content/drive/MyDrive/ner_results/shared")
+    / "bigru"
+)
+
+drive_export_root.mkdir(parents=True, exist_ok=True)
+
+drive_output_dir = drive_export_root / output_dir.name
+
+shutil.copytree(output_dir, drive_output_dir)
+
+# Save checkpoint and tokenizer
+shutil.copy2(
+    selected_checkpoint,
+    drive_output_dir / "checkpoint.pt"
+)
+
+shutil.copy2(
+    tokenizer_path,
+    drive_output_dir / "tokenizer.json"
+)
+
+# Verify backup
+for filename in [
+    "val.jsonl",
+    "test.jsonl",
+    "checkpoint.pt",
+    "tokenizer.json",
+]:
+    assert (drive_output_dir / filename).is_file()
+
+print("Saved to Google Drive:")
+print(drive_output_dir)
+
+shutil.copytree() копіює всю папку з результатами, а copy2() окремо додає checkpoint і tokenizer.
+Оскільки назва папки містить timestamp, кожен новий експорт матиме власну директорію. А copytree() за замовчуванням не перезаписує вже наявну папку.
+У результаті колега отримає:
+
+ner_results/
+└── shared/
+    └── bigru/
+        └── bigru_ensemble_20261112_.../
+            ├── val.jsonl
+            ├── test.jsonl
+            ├── checkpoint.pt
+            └── tokenizer.json  Тепер у неї є все необхідне, щоб почати ensemble на рівні передбачених spans.
+
+
+
 
 
 
