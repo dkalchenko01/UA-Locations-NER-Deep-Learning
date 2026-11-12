@@ -48,7 +48,7 @@ def restore_word(text, start, end):
 def postprocess(text, spans, expand=False, trim=False, empty=False):
     locations = []
     for start, end in spans:
-        if expand:
+        if expand and sum(ch.isalpha() for ch in text[start:end]) > 4:
             start, end = restore_word(text, start, end)
         location = text[start:end]
         if trim:
