@@ -36,3 +36,27 @@ Trained Whitespace and ByteLevel BPE on training text only, with **32,000 tokens
 - ByteLevel had better coverage: 0% unknown test tokens, compared to 2.01% for Whitespace
 - Checked that BIO labels recover the original spans: zero mismatches among aligned examples.
 - Preserved original text and character offsets so predictions can be returned as exact text substrings, including original spelling and punctuation.
+
+## Stacked BiGRU
+
+**Notebook:** `04_bigru_stacked.ipynb`
+
+We implemented a **3-layer bidirectional GRU**, reusing the existing training and evaluation pipeline. The initial hyperparameters were chosen to approximately match the best Stacked BiLSTM configuration (further tuning planned).
+
+- **Tokenizer:** Whitespace BPE, vocabulary size 32,000.
+- **Architecture:** trainable 128-dimensional embeddings -> 3 bidirectional GRU layers (hidden size 256 per direction) -> dropout 0.2 -> linear classifier predicting O/B-LOC/I-LOC.
+- **Training:** Adam optimizer, learning rate 0.001, batch size 128, seed 17, trained for 3 epochs.
+- **Inference:** full-message prediction, followed by BIO-constrained Viterbi decoding with line-break constraints (`viterbi_lines`).
+- **Postprocessing:** word-boundary expansion, edge trimming, `clean_v3`, and removal of predictions with empty normalised locations, matching the best BiLSTM pipeline.
+
+### Results
+
+We evaluated the checkpoints using the official normalized micro F1 metric. The best result after Viterbi decoding and postprocessing was obtained at **epoch 3**.
+
+| Validation metric | F1 |
+|---|---:|
+| Ukrainian | 0.87600 |
+| russian | 0.90177 |
+| Combined | 0.88253 |
+
+**Kaggle Public F1: 0.59084**.
