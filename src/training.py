@@ -46,7 +46,7 @@ def train_epoch(model, loader, optimizer, device, gradient_clip=1.0):
 
 
 @torch.no_grad()
-def predict(model, loader, device, decoding="argmax"):
+def predict(model, loader, device, decoding="argmax", return_logits=False):
     if decoding not in ("argmax", "viterbi", "viterbi_lines"):
         raise ValueError(f"Unknown decoding: {decoding}")
     model.eval()
@@ -67,7 +67,9 @@ def predict(model, loader, device, decoding="argmax"):
                                  ignore_index=IGNORE_INDEX, reduction="none")
         losses = losses.reshape_as(labels).sum(dim=1).cpu().tolist()
         counts = labels.ne(IGNORE_INDEX).sum(dim=1).cpu().tolist()
-        for record, predicted, loss, count in zip(batch["records"], pred_ids, losses, counts):
+
+        cpu_logits = logits.cpu() if return_logits else None
+        for i, (record, predicted, loss, count) in enumerate(zip(batch["records"], pred_ids, losses, counts)):
             source = record["source"]
             loss_sums[source] = loss_sums.get(source, 0.0) + loss
             token_counts[source] = token_counts.get(source, 0) + count
@@ -77,6 +79,9 @@ def predict(model, loader, device, decoding="argmax"):
             predictions[record["text_id"]] = {
                 "spans": spans, "locations": [record["text"][a:b] for a, b in spans]
             }
+            if return_logits:
+                n_tokens = len(record["input_ids"])
+                predictions[record["text_id"]]["logits"] = cpu_logits[i, :n_tokens].tolist()
     losses = {source: loss_sums[source] / count if count else None
               for source, count in token_counts.items()}
     n_tokens = sum(token_counts.values())
