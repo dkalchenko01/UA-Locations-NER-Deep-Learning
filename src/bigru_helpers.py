@@ -41,11 +41,19 @@ def backup_files(destination, *files):
 
 
 def postprocessed_scores(records, predictions, clean_options=None):
-    """Compute the unchanged official competition metric after span cleanup."""
     options = CLEAN_OPTIONS if clean_options is None else clean_options
-    cleaned = {record["text_id"]: {"locations": postprocess(
-        record["text"], predictions[record["text_id"]]["spans"], **options,
-    )} for record in records}
+
+    cleaned = {
+        record["text_id"]: {
+            "locations": postprocess(
+                record["text"],
+                predictions[record["text_id"]]["spans"],
+                **options
+            )
+        }
+        for record in records
+    }
+
     return competition_scores(records, cleaned)
 
 
