@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from tqdm.auto import tqdm
 
-from src.metrics import comp_metric
+from src.metrics import competition_scores
 from src.postprocessing import postprocess
 
 
@@ -43,21 +43,10 @@ def backup_files(destination, *files):
 def postprocessed_scores(records, predictions, clean_options=None):
     """Compute the unchanged official competition metric after span cleanup."""
     options = CLEAN_OPTIONS if clean_options is None else clean_options
-    by_source = dict.fromkeys([r["source"] for r in records])
-    truth, guess = {s: [] for s in by_source}, {s: [] for s in by_source}
-    for record in records:
-        source = record["source"]
-        truth[source].append(record["gold_locations"])
-        guess[source].append(postprocess(
-            record["text"], predictions[record["text_id"]]["spans"], **options,
-        ))
-    scores = {f"{source}_comp_f1": comp_metric(truth[source], guess[source])
-              for source in by_source}
-    scores["combined_comp_f1"] = comp_metric(
-        [item for source in by_source for item in truth[source]],
-        [item for source in by_source for item in guess[source]],
-    )
-    return scores
+    cleaned = {record["text_id"]: {"locations": postprocess(
+        record["text"], predictions[record["text_id"]]["spans"], **options,
+    )} for record in records}
+    return competition_scores(records, cleaned)
 
 
 @torch.no_grad()

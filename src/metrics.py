@@ -61,14 +61,47 @@ def location_errors(gold, predicted):
             "false_negatives": sorted(truth - guess)}
 
 
+def prediction_metrics(y_true, y_pred):
+    f1 = comp_metric(y_true, y_pred)
+    tp, fp, fn = 0, 0, 0
+
+    for gold, predicted in zip(y_true, y_pred):
+        gold = set(hard_processing(value) for value in gold)
+        predicted = set(hard_processing(value) for value in predicted)
+
+        tp += len(gold & predicted)
+        fp += len(predicted - gold)
+        fn += len(gold - predicted)
+
+    precision = tp / (tp + fp) if tp + fp else float(tp + fn == 0)
+    recall = tp / (tp + fn) if tp + fn else 1.0
+
+    return {"f1": f1,
+        "precision": precision,
+        "recall": recall,
+        "TP": tp,
+        "FP": fp,
+        "FN": fn}
+
 def competition_scores(records, predictions, cleaner=None):
     scores = {}
     sources = list(dict.fromkeys(record["source"] for record in records))
+
     for source in sources + ["combined"]:
-        selected = records if source == "combined" else [r for r in records if r["source"] == source]
+        selected = records if source == "combined" else [
+            record for record in records if record["source"] == source
+        ]
         gold = [record["gold_locations"] for record in selected]
         predicted = [predictions[record["text_id"]]["locations"] for record in selected]
+
         if cleaner is not None:
             predicted = [cleaner(locations) for locations in predicted]
-        scores[f"{source}_comp_f1"] = comp_metric(gold, predicted)
+
+        if source == "combined":
+            metrics = prediction_metrics(gold, predicted)
+            scores["combined_comp_f1"] = metrics.pop("f1")
+            scores.update(metrics)
+        else:
+            scores[f"{source}_comp_f1"] = comp_metric(gold, predicted)
+
     return scores
