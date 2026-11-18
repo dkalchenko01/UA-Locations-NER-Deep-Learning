@@ -1,0 +1,114 @@
+# Ukrainian Location Extraction
+
+## Data insights
+
+**Notebook:** `01_eda.ipynb`
+
+- Training data: 1.01M Ukrainian and 8.03M russian texts. Only 23% / 31% contain locations.
+- Test: 477 posts, roughly 90% Ukrainian (character-based estimate). Median length is 264 characters, compared to 91–110 in training. **85%** texts have line breaks and **52%** match the emoji pattern.
+- Ukrainian training texts have maximum **255 characters**, while test reaches 3,682. Models must handle longer posts and unfamiliar symbols; sentence-validation scores may overestimate test performance.
+- Labels use character spans `[start, end)`. Some names have incorrect boundaries or irrelevant labels (despite the valid offsets).
+
+## Validation
+
+**Notebook:** `02_validation.ipynb`
+
+We used GroupShuffleSplit to create one fixed validation set. Near-duplicate Ukrainian texts stay in one split; russian sentences are grouped by `doc_id`. All models use the same split for comparison. 
+
+- Removed duplicates and texts with conflicting stored annotations. 
+- Shared split: seed 17, Ukrainian 80/20. To reflect the test language mix (mostly Ukrainian), we subsample russian training data to only 100,000 texts.
+
+| Source | Train | Validation |
+|---|---:|---:|
+| Ukrainian | 805,983 | 201,498 |
+| russian | 100,000 | 49,369 |
+
+- No shared groups between splits; text lengths and location frequencies are similar.
+- For addiitonal diagnostics we also combined 5,000 validation sentences into 1,000 noisy posts.
+- We did not use the 26-post `labeling_sample.csv` for model selection or error diagnostics, because some location annotations are missed there.
+- Main score: **official normalized micro F1**; repeated names count once per text. Additional metrics chosen for tracking: precision, recall, exact entity-level F1 and mean per-text F1.
+
+## Preprocessing
+
+**Notebook:** `03_preprocessing.ipynb`
+
+Trained Whitespace and ByteLevel BPE on training text only - 32,000 tokens each. Then converted location spans into **BIO labels**. Labels can cover several subword tokens.
+- ByteLevel had better coverage: 0% unknown test tokens, compared to 2.01% for Whitespace
+- Checked that BIO labels recover the original spans: zero mismatches among aligned examples.
+- Preserved original text and character offsets so predictions can be returned as exact text substrings, including original spelling and punctuation.
+
+## Stacked BiLSTM
+
+**Notebook:** `04_bilstm_stacked.ipynb`
+
+We created a **3-layer bidirectional LSTM**, reusing the existing training and evaluation pipeline. The hyperparameters were chosen through two rounds of W&B grid search:
+1. Learning rate × dropout: learning rates of 0.0003, 0.001, and 0.003, combined with dropout rates of 0.2 and 0.4, for five epochs per run.
+2. Hidden size × batch size: hidden sizes of 128, 256, and 384 per direction, combined with batch sizes of 64 and 128, for three epochs per run, keeping the learning rate at 0.001 and dropout at 0.2.
+
+Increasing the depth from two to three layers improved Kaggle performance, while a fourth layer provided no further improvement. Higher dropout (0.4) and the tested chunked-inference configuration also reduced the Public score. The final combination of viterbi_lines and postprocessing achieved 0.57383 Kaggle Public F1, compared with 0.56551 using clean_v3 alone. Across experiments, improvements on the original validation set did not consistently translate into higher Kaggle scores.
+
+- **Tokenizer:** ByteLevel BPE, vocabulary size 32,000
+- **Architecture:** trainable 128-dimensional embeddings -> 3 bidirectional LSTM layers (hidden size 256 per direction) -> dropout 0.2 -> linear classifier predicting O/B-LOC/I-LOC
+- **Training:** Adam optimizer, learning rate 0.001, batch size 128, seed 17, trained for 5 epochs
+- **Inference:** full-message prediction, followed by BIO-constrained Viterbi decoding with line-break constraints (`viterbi_lines`)
+- **Postprocessing:** word-boundary expansion, edge trimming, `clean_v3`, removal of predictions with empty locations
+
+**Results**
+
+We evaluated the checkpoints using the normalized micro F1 metric. The best result (after Viterbi decoding and postprocessing) was at **epoch 3**.
+
+| Validation metric | F1 |
+|---|---:|
+| Ukrainian | 0.88636 |
+| russian | 0.91251 |
+| Combined | 0.89295 |
+
+**Kaggle Public F1: 0.57383**.
+
+## Stacked BiGRU
+
+**Notebook:** `04_bigru_stacked.ipynb`
+
+We implemented a **3-layer bidirectional GRU**, reusing the existing training and evaluation pipeline. The initial hyperparameters were chosen to approximately match the best Stacked BiLSTM configuration (further tuning planned).
+
+- **Tokenizer:** Whitespace BPE, vocabulary size 32,000
+- **Architecture:** trainable 128-dimensional embeddings -> 3 bidirectional GRU layers (hidden size 256 per direction) -> dropout 0.2 -> linear classifier predicting O/B-LOC/I-LOC
+- **Training:** Adam optimizer, learning rate 0.001, batch size 128, seed 17, trained for 3 epochs
+- **Inference:** full-message prediction, followed by BIO-constrained Viterbi decoding with line-break constraints (`viterbi_lines`)
+- **Postprocessing:** word-boundary expansion, edge trimming, `clean_v3`, removal of predictions with empty locations
+
+**Results**
+
+We evaluated the checkpoints using the normalized micro F1 metric. The best result (after Viterbi decoding and postprocessing) was at **epoch 3**.
+
+| Validation metric | F1 |
+|---|---:|
+| Ukrainian | 0.87600 |
+| russian | 0.90177 |
+| Combined | 0.88253 |
+
+**Kaggle Public F1: 0.59084**.
+
+## Ensemble
+
+**Notebook:** `05_ensemble.ipynb`
+
+Combined Stacked BiLSTM (ByteLevel BPE) and Stacked BiGRU (Whitespace BPE), both on epoch 3 checkpoints and `viterbi_lines` decoding.
+
+- Different tokenizers were handled through character spans; location names were compared using the official normalization.
+- **Union:** keeps names predicted by either model (increasing Recall).
+- **Intersection:** keeps names predicted by both models (increasing Precision).
+- Shared postprocessing applied to both models before combining predictions.
+- Edge cleanup removes symbols only from the edges of names.
+
+### Results
+
+| Variant | Kaggle Public F1 |
+|---|---:|
+| BiLSTM | 0.57383 |
+| BiGRU | 0.59084 |
+| Union, original cleanup | 0.56549 |
+| Intersection, original cleanup | 0.60645 |
+| Intersection, edge cleanup | **0.60869** |
+
+Intersection with edge cleanup was our best submission.
