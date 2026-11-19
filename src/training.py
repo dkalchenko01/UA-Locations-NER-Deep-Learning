@@ -67,9 +67,9 @@ def predict(model, loader, device, decoding="argmax", return_logits=False):
                                  ignore_index=IGNORE_INDEX, reduction="none")
         losses = losses.reshape_as(labels).sum(dim=1).cpu().tolist()
         counts = labels.ne(IGNORE_INDEX).sum(dim=1).cpu().tolist()
-
         cpu_logits = logits.cpu() if return_logits else None
-        for i, (record, predicted, loss, count) in enumerate(zip(batch["records"], pred_ids, losses, counts)):
+        for i, (record, predicted, loss, count) in enumerate(
+                zip(batch["records"], pred_ids, losses, counts)):
             source = record["source"]
             loss_sums[source] = loss_sums.get(source, 0.0) + loss
             token_counts[source] = token_counts.get(source, 0) + count

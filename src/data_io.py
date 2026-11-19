@@ -33,8 +33,8 @@ def select_manifest_rows(df, manifest, source, split):
     return df.loc[selected].copy()
 
 
-def load_data_splits(environment, splits_dir, sources=("uk", "ru"),
-                     chunksize=100_000, manifest_name="validation_manifest_v2"):
+def load_data_splits(environment, splits_dir, sources=("uk", "ru"), chunksize=100_000,
+                     manifest_name="validation_manifest"):
     data_dir = get_data_dir(environment)
     manifest = load_manifest(splits_dir, name=manifest_name)
     result = {}
@@ -54,7 +54,7 @@ def load_data_splits(environment, splits_dir, sources=("uk", "ru"),
 
         df = pd.concat(parts)
 
-        for split in ("train", "val", "holdout"):
+        for split in source_manifest["split"].unique():
             result[f"{source}_{split}"] = select_manifest_rows(
                 df, source_manifest, source, split
             )
@@ -70,6 +70,18 @@ def load_testlike(splits_dir):
 
     original = original.set_index("row_id", drop=False)
     return original, synthetic
+
+
+def backup_files(directory, *paths):
+    import shutil
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    for path in paths:
+        path = Path(path)
+        temporary = directory / (path.name + ".tmp")
+        shutil.copy2(path, temporary)
+        temporary.replace(directory / path.name)
 
 
 def save_json(path, value):
@@ -88,13 +100,19 @@ def file_sha256(path):
 def save_predictions(path, records, predictions):
     rows = []
     for record in records:
-        rows.append({
+        row = {
             "text_id": record["text_id"],
             "row_id": record["row_id"],
-            "text": record["text"],
+            "text": record.get("text"),
             "source": record["source"],
             "gold_locations": record.get("gold_locations"),
-            "input_ids": record["input_ids"].tolist(),
-            "offsets": record["offsets"].tolist(),
-            **predictions[record["text_id"]]})
+        }
+        for key in ("input_ids", "offsets"):
+            if key in record:
+                row[key] = record[key].tolist()
+        row.update(predictions[record["text_id"]])
+        rows.append(row)
+        
     pd.DataFrame(rows).to_json(path, orient="records", lines=True, force_ascii=False)
+  
+  

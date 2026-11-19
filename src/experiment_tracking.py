@@ -146,7 +146,8 @@ def log_epoch(
     """Log one already-computed epoch_result from the current notebooks.
 
     Supported input keys: train_loss, uk/ru/combined_val_loss,
-    uk/ru/combined_comp_f1. Does not evaluate or select a checkpoint.
+    uk/ru/combined_comp_f1, precision, recall, TP, FP, FN.
+    Does not evaluate or select a checkpoint.
     """
     if epoch < 1:
         raise ValueError("epoch must be >= 1")
@@ -165,6 +166,10 @@ def log_epoch(
             metrics[f"{prefix}/{source}_comp_f1"] = float(
                 epoch_result[f"{source}_comp_f1"]
             )
+
+    for name in ("precision", "recall", "TP", "FP", "FN"):
+        if epoch_result.get(name) is not None:
+            metrics[f"{prefix}/{name}"] = float(epoch_result[name])
 
     if epoch_seconds is not None:
         metrics["time/epoch_seconds"] = float(epoch_seconds)
