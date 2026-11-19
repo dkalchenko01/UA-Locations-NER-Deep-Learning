@@ -21,7 +21,7 @@ def get_data_dir(environment: str) -> Path:
 
     return data_dir
 
-def load_manifest(splits_dir, name="validation_manifest"):
+def load_manifest(splits_dir, name="validation_manifest_v2"):
     path = Path(splits_dir) / f"{name}.parquet"
     if not path.is_file():
         raise FileNotFoundError(f"Manifest not found: {path}")
@@ -29,18 +29,7 @@ def load_manifest(splits_dir, name="validation_manifest"):
 
 
 def select_manifest_rows(df, manifest, source, split):
-    selected = manifest.loc[
-        (manifest["source"] == source) & (manifest["split"] == split),
-        "row_id"
-    ]
-
-    if not df.index.is_unique:
-        raise ValueError("Dataset index must be unique")
-
-    missing = pd.Index(selected).difference(df.index)
-    if len(missing):
-        raise ValueError(f"{len(missing)} row_ids not found in dataset")
-
+    selected = manifest.loc[(manifest["source"] == source) & (manifest["split"] == split), "row_id"]
     return df.loc[selected].copy()
 
 
@@ -51,38 +40,36 @@ def load_data_splits(environment, splits_dir, sources=("uk", "ru"), chunksize=10
     result = {}
 
     for source in sources:
-        if source not in ("uk", "ru"):
-            raise ValueError(f"Unsupported source: {source}")
-
-        source_manifest = manifest.loc[manifest["source"] == source]
+        source_manifest = manifest[manifest["source"] == source]
         required_ids = pd.Index(source_manifest["row_id"])
         parts = []
         offset = 0
 
-        reader = pd.read_csv(
-            data_dir / f"{source}_geo_dataset.csv",
-            chunksize=chunksize
-        )
-
-        for chunk in reader:
+        for chunk in pd.read_csv(data_dir / f"{source}_geo_dataset.csv", chunksize=chunksize):
             chunk.index = pd.RangeIndex(offset, offset + len(chunk))
             selected = chunk.loc[chunk.index.isin(required_ids)]
-
             if not selected.empty:
                 parts.append(selected)
-
             offset += len(chunk)
 
         df = pd.concat(parts)
 
         for split in source_manifest["split"].unique():
             result[f"{source}_{split}"] = select_manifest_rows(
-                df, manifest, source, split
+                df, source_manifest, source, split
             )
 
         del df, parts
 
     return result
+
+def load_testlike(splits_dir):
+    splits_dir = Path(splits_dir)
+    original = pd.read_parquet(splits_dir / "uk_testlike_original_v2.parquet")
+    synthetic = pd.read_parquet(splits_dir / "uk_testlike_v2.parquet")
+
+    original = original.set_index("row_id", drop=False)
+    return original, synthetic
 
 
 def backup_files(directory, *paths):
@@ -111,9 +98,21 @@ def file_sha256(path):
 
 
 def save_predictions(path, records, predictions):
-    rows = [{"text_id": record["text_id"], "row_id": record["row_id"],
-             "text": record.get("text"), "source": record["source"],
-             "gold_locations": record.get("gold_locations"),
-             **{key: record[key].tolist() for key in ("input_ids", "offsets") if key in record},
-             **predictions[record["text_id"]]} for record in records]
+    rows = []
+    for record in records:
+        row = {
+            "text_id": record["text_id"],
+            "row_id": record["row_id"],
+            "text": record.get("text"),
+            "source": record["source"],
+            "gold_locations": record.get("gold_locations"),
+        }
+        for key in ("input_ids", "offsets"):
+            if key in record:
+                row[key] = record[key].tolist()
+        row.update(predictions[record["text_id"]])
+        rows.append(row)
+        
     pd.DataFrame(rows).to_json(path, orient="records", lines=True, force_ascii=False)
+  
+  

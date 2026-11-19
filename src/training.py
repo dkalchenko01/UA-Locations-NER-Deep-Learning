@@ -80,7 +80,8 @@ def predict(model, loader, device, decoding="argmax", return_logits=False):
                 "spans": spans, "locations": [record["text"][a:b] for a, b in spans]
             }
             if return_logits:
-                predictions[record["text_id"]]["logits"] = cpu_logits[i, :len(record["input_ids"])].tolist()
+                n_tokens = len(record["input_ids"])
+                predictions[record["text_id"]]["logits"] = cpu_logits[i, :n_tokens].tolist()
     losses = {source: loss_sums[source] / count if count else None
               for source, count in token_counts.items()}
     n_tokens = sum(token_counts.values())
